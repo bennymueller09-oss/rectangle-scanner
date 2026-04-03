@@ -100,8 +100,28 @@ def monitor_fehler(fehler_typ, details=""):
     msg = nachrichten.get(fehler_typ, f"⚠️ Unbekannter Fehler: {fehler_typ}\n{details}\n🕐 {now}")
     send_telegram(msg)
 
+def markt_offen():
+    """
+    Prüft ob der US-Markt gerade offen ist.
+    US-Markt: Mo–Fr 15:30–22:00 Uhr DE-Zeit (MEZ/MESZ)
+    """
+    now  = datetime.now()
+    wday = now.weekday()          # 0=Mo, 4=Fr, 5=Sa, 6=So
+    hour = now.hour
+    minute = now.minute
+    if wday >= 5:                 # Wochenende
+        return False
+    time_now = hour * 60 + minute
+    # 15:30 = 930 min, 22:00 = 1320 min
+    return 930 <= time_now <= 1320
+
 def monitor_ok_nachricht():
-    """Schickt einmal pro Tag eine Bestätigung dass alles läuft."""
+    """
+    Schickt einmal pro Tag eine Bestätigung — aber nur wenn der Markt offen ist.
+    Verhindert sinnlose Nachrichten am Wochenende oder außerhalb der Handelszeiten.
+    """
+    if not markt_offen():
+        return
     if "letzter_ok_tag" not in st.session_state:
         st.session_state["letzter_ok_tag"] = ""
     heute = datetime.now().strftime("%Y-%m-%d")
@@ -351,7 +371,7 @@ def main():
 
         # ── Monitoring: Fehlerquote prüfen ────────────────────────────────────
         fehler_pct = len(fehler_ticker) / max(len(watchlist), 1) * 100
-        if fehler_pct > 30:
+        if fehler_pct > 30 and markt_offen():
             monitor_fehler("HOHE_FEHLERQUOTE",
                            f"{len(fehler_ticker)} von {len(watchlist)} Aktien")
 
