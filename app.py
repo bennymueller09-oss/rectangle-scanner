@@ -2,6 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import urllib.request
+import json
 import time
 from datetime import datetime
 
@@ -14,44 +16,44 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-/* Metriken */
 div[data-testid="metric-container"] {
-    background: #1a1d2e;
-    border: 1px solid #2a2d45;
-    border-radius: 12px;
-    padding: 16px 20px;
+    background: #1a1d2e; border: 1px solid #2a2d45;
+    border-radius: 12px; padding: 16px 20px;
 }
-div[data-testid="metric-container"] label {
-    color: #9ca3af !important;
-    font-size: 13px !important;
-}
+div[data-testid="metric-container"] label { color: #9ca3af !important; font-size: 13px !important; }
 div[data-testid="metric-container"] [data-testid="metric-value"] {
-    color: #f9fafb !important;
-    font-size: 26px !important;
-    font-weight: 600 !important;
+    color: #f9fafb !important; font-size: 26px !important; font-weight: 600 !important;
 }
-/* Sidebar */
-[data-testid="stSidebar"] {
-    background: #0d1117;
-    border-right: 1px solid #21262d;
-}
+[data-testid="stSidebar"] { background: #0d1117; border-right: 1px solid #21262d; }
 [data-testid="stSidebar"] label,
 [data-testid="stSidebar"] p,
-[data-testid="stSidebar"] span {
-    color: #c9d1d9 !important;
-}
-/* Tabelle */
-[data-testid="stDataFrame"] {
-    border-radius: 10px;
-    overflow: hidden;
-    border: 1px solid #21262d;
-}
-/* Divider */
+[data-testid="stSidebar"] span { color: #c9d1d9 !important; }
+[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; border: 1px solid #21262d; }
 hr { border-color: #21262d !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Watchlist (342 Ticker aus Nasdaq + S&P500 + Dow, ohne BRK.B / BF.B) ─────
+# ── Telegram Konfiguration ────────────────────────────────────────────────────
+TELEGRAM_TOKEN   = "8749676636:AAGExnmvm04UVkaqgrqZbRzyB1boOZN6Drc"
+TELEGRAM_CHAT_ID = "8663512493"
+
+def send_telegram(text):
+    """Schickt eine Nachricht an Telegram."""
+    try:
+        url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = json.dumps({
+            "chat_id":    TELEGRAM_CHAT_ID,
+            "text":       text,
+            "parse_mode": "HTML",
+        }).encode()
+        req = urllib.request.Request(url, data=data,
+              headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=5)
+        return True
+    except Exception:
+        return False
+
+# ── Watchlist (342 Ticker — Nasdaq + S&P500 + Dow) ───────────────────────────
 WATCHLIST = [
     "AAL","AAPL","ABBV","ABNB","ABT","ACN","ADBE","ADI","ADM","ADP","ADSK",
     "AEP","AES","AFL","AIG","AIZ","AJG","ALK","ALLE","AMAT","AMD","AME",
@@ -89,10 +91,9 @@ WATCHLIST = [
 # ── Hilfsfunktionen ───────────────────────────────────────────────────────────
 
 def normalize_df(df):
-    if df is None or df.empty:
-        return None
+    if df is None or df.empty: return None
     cols = {c: (c[0] if isinstance(c, tuple) else c) for c in df.columns}
-    df = df.rename(columns=cols)
+    df   = df.rename(columns=cols)
     return df.loc[:, ~df.columns.duplicated()]
 
 @st.cache_data(ttl=60)
@@ -146,28 +147,27 @@ def check_setup(df, p):
         lo   = float(recent["Low"].values.flatten().astype(float).min())
         kurs = float(df["Close"].values.flatten().astype(float)[-1])
         rng  = (hi - lo) / lo * 100 if lo > 0 else 0
-        r.update(hi=hi, lo=lo, range_pct=round(rng, 2), kurs=round(kurs, 2))
+        r.update(hi=hi, lo=lo, range_pct=round(rng,2), kurs=round(kurs,2))
 
         ph = float(prior["High"].values.flatten().astype(float).max())
         pl = float(prior["Low"].values.flatten().astype(float).min())
-        mp = max((ph-pl)/pl*100 if pl>0 else 0,
-                 (ph-pl)/ph*100 if ph>0 else 0)
-        r["mom_pct"] = round(mp, 2)
+        mp = max((ph-pl)/pl*100 if pl>0 else 0, (ph-pl)/ph*100 if ph>0 else 0)
+        r["mom_pct"]  = round(mp, 2)
         cv = prior["Close"].values.flatten().astype(float)
         r["momentum"] = mp >= p["min_mom_pct"] and float(cv[-1]) != float(cv[0])
         r["rectangle"] = rng < p["max_range_pct"]
 
         ms = ph - pl; rs = hi - lo
-        cp = (rs / ms * 100) if ms > 0 else 100
-        r["corr_pct"]    = round(cp, 1)
-        r["ein_drittel"] = cp < p["max_corr_pct"]
+        cp = (rs/ms*100) if ms > 0 else 100
+        r["corr_pct"]     = round(cp, 1)
+        r["ein_drittel"]  = cp < p["max_corr_pct"]
 
         dh = float(df["High"].values.flatten().astype(float).max())
         dl = float(df["Low"].values.flatten().astype(float).min())
-        r["tageshoch"] = (hi >= dh * (1 - p["near_high_pct"]/100) or
-                          lo <= dl * (1 + p["near_high_pct"]/100))
+        r["tageshoch"] = (hi >= dh*(1-p["near_high_pct"]/100) or
+                          lo <= dl*(1+p["near_high_pct"]/100))
 
-        half = max(lb // 2, 3)
+        half = max(lb//2, 3)
         if len(recent) > half:
             he = float(recent.iloc[:half]["High"].values.flatten().astype(float).max())
             hl = float(recent.iloc[half:]["High"].values.flatten().astype(float).max())
@@ -185,7 +185,7 @@ def check_setup(df, p):
         erf = sum([r["momentum"], r["rectangle"], r["ein_drittel"],
                    r["tageshoch"], r["seitwaerts"], r["auflagen"]])
         r["erfuellt"] = erf
-        r["status"]   = "SETUP ✓" if erf == 6 else "FAST" if erf >= 4 else "NEIN"
+        r["status"]   = "SETUP ✓" if erf==6 else "FAST" if erf>=4 else "NEIN"
     except Exception:
         r["status"] = "FEHLER"
     return r
@@ -193,16 +193,14 @@ def check_setup(df, p):
 # ── Hauptfunktion ─────────────────────────────────────────────────────────────
 
 def main():
-    # ── Header ────────────────────────────────────────────────────────────────
     col_h1, col_h2 = st.columns([3, 1])
     with col_h1:
         st.title("🟦 Rectangle Scanner")
         st.caption("Momentum-Konsolidierung am Tageshoch · 1-Minuten-Chart · 342 Aktien")
     with col_h2:
-        now = datetime.now().strftime("%H:%M:%S")
-        st.metric("🕐 Uhrzeit", now)
+        st.metric("🕐 Uhrzeit", datetime.now().strftime("%H:%M:%S"))
 
-    # ── Sidebar ────────────────────────────────────────────────────────────────
+    # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("### ⚙️ Parameter")
         p = {
@@ -212,14 +210,18 @@ def main():
             "min_mom_pct":   st.slider("Min. Momentum %",       0.5, 5.0, 1.5, 0.1),
             "max_corr_pct":  st.slider("Max. Korrektur %",      10,  50,  33),
             "sideways_tol":  st.slider("Seitwärts Toleranz %",  0.1, 1.0, 0.4, 0.05),
-            "mom_kerzen":    30,
-            "touch_tol":     0.05,
-            "near_high_pct": 0.5,
+            "mom_kerzen": 30, "touch_tol": 0.05, "near_high_pct": 0.5,
         }
         st.divider()
+        st.markdown("### 🔔 Telegram Alerts")
+        tg_aktiv = st.toggle("Benachrichtigungen aktiv", value=True)
+        st.caption("@Rectangelbot · Chat-ID: 8663512493")
+        if st.button("🧪 Test-Nachricht senden"):
+            ok = send_telegram("🧪 <b>Test</b> — Rectangle Scanner ist aktiv!")
+            st.success("✅ Gesendet!") if ok else st.error("❌ Fehler")
+        st.divider()
         st.markdown("### 📋 Watchlist")
-        custom    = st.text_area("Ticker (eine pro Zeile)",
-                                 "\n".join(WATCHLIST), height=180)
+        custom    = st.text_area("Ticker (eine pro Zeile)", "\n".join(WATCHLIST), height=160)
         watchlist = [t.strip().upper() for t in custom.split("\n") if t.strip()]
         st.caption(f"**{len(watchlist)}** Aktien in der Watchlist")
         st.divider()
@@ -239,22 +241,44 @@ def main():
     st.divider()
 
     # ── Scan ──────────────────────────────────────────────────────────────────
-    rows     = []
-    progress = st.progress(0, text="Scanner läuft …")
+    rows           = []
+    neue_setups    = []
+    progress       = st.progress(0, text="Scanner läuft …")
+
+    # Bereits gemeldete Setups aus Session State holen (verhindert Doppelmeldungen)
+    if "gemeldet" not in st.session_state:
+        st.session_state["gemeldet"] = set()
 
     for i, ticker in enumerate(watchlist):
-        progress.progress((i + 1) / len(watchlist),
-                          text=f"Scanne {ticker} … ({i+1}/{len(watchlist)})")
+        progress.progress((i+1)/len(watchlist), f"Scanne {ticker} … ({i+1}/{len(watchlist)})")
         df = get_data(ticker)
         if df is None:
-            rows.append({
-                "Aktie": ticker, "Kurs": "–", "Status": "FEHLER",
-                "Momentum": "✗", "Rectangle": "✗", "1/3 Regel": "✗",
-                "Tageshoch": "✗", "Seitwärts": "✗", "Auflagen": "✗",
-                "Range %": "–", "Korrektur %": "–", "R/S": "–", "Erfüllt": 0,
-            })
+            rows.append({"Aktie":ticker,"Kurs":"–","Status":"FEHLER",
+                         "Momentum":"✗","Rectangle":"✗","1/3 Regel":"✗",
+                         "Tageshoch":"✗","Seitwärts":"✗","Auflagen":"✗",
+                         "Range %":"–","Korrektur %":"–","R/S":"–","Erfüllt":0})
             continue
         r = check_setup(df, p)
+
+        # Telegram Alert bei neuem Setup
+        if tg_aktiv and r["status"] == "SETUP ✓" and ticker not in st.session_state["gemeldet"]:
+            st.session_state["gemeldet"].add(ticker)
+            neue_setups.append(ticker)
+            now_str = datetime.now().strftime("%H:%M:%S")
+            msg = (
+                f"🟦 <b>RECTANGLE SETUP ✅</b>\n"
+                f"<b>{ticker}</b> — alle 6 Kriterien erfüllt\n"
+                f"Kurs: <b>${r['kurs']}</b>\n"
+                f"Momentum: {r['mom_pct']}%  |  Range: {r['range_pct']}%\n"
+                f"Korrektur: {r['corr_pct']}%\n"
+                f"🕐 {now_str}"
+            )
+            send_telegram(msg)
+
+        # Wenn Setup nicht mehr aktiv → aus gemeldeten entfernen
+        if r["status"] != "SETUP ✓" and ticker in st.session_state["gemeldet"]:
+            st.session_state["gemeldet"].discard(ticker)
+
         rows.append({
             "Aktie":       ticker,
             "Kurs":        f"${r['kurs']}",
@@ -272,55 +296,53 @@ def main():
         })
 
     progress.empty()
+
+    # Neue Alerts anzeigen
+    if neue_setups:
+        st.balloons()
+        st.success(f"🔔 Telegram Alert gesendet für: {', '.join(neue_setups)}")
+
     df_all  = pd.DataFrame(rows)
-    n_ok    = len(df_all[df_all["Status"] == "SETUP ✓"])
-    n_fast  = len(df_all[df_all["Status"] == "FAST"])
-    n_err   = len(df_all[df_all["Status"] == "FEHLER"])
     scan_ts = datetime.now().strftime("%H:%M:%S")
 
     # ── Metriken ──────────────────────────────────────────────────────────────
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("📊 Gescannt",       len(df_all))
-    c2.metric("✅ Setup erfüllt",   n_ok)
-    c3.metric("🔎 Fast erfüllt",    n_fast)
-    c4.metric("⚠️ Keine Daten",     n_err)
-    c5.metric("🕐 Scan abgeschlossen", scan_ts)
+    c1,c2,c3,c4,c5 = st.columns(5)
+    c1.metric("📊 Gescannt",      len(df_all))
+    c2.metric("✅ Setup erfüllt",  len(df_all[df_all["Status"]=="SETUP ✓"]))
+    c3.metric("🔎 Fast erfüllt",   len(df_all[df_all["Status"]=="FAST"]))
+    c4.metric("🔔 Alerts",         len(st.session_state["gemeldet"]))
+    c5.metric("🕐 Scan um",        scan_ts)
     st.divider()
 
     # ── Ergebnisse ────────────────────────────────────────────────────────────
     df_setup = df_all[df_all["Status"] == "SETUP ✓"]
     if not df_setup.empty:
         st.subheader(f"✅ Vollständiges Setup — alle 6 Kriterien erfüllt ({len(df_setup)})")
-        st.dataframe(df_setup.drop(columns=["Erfüllt"]),
-                     use_container_width=True, hide_index=True)
+        st.dataframe(df_setup.drop(columns=["Erfüllt"]), use_container_width=True, hide_index=True)
     else:
         st.info("📭 Aktuell kein vollständiges Rectangle-Setup vorhanden.")
 
-    df_fast = df_all[df_all["Status"] == "FAST"].sort_values("Erfüllt", ascending=False)
+    df_fast = df_all[df_all["Status"]=="FAST"].sort_values("Erfüllt", ascending=False)
     if not df_fast.empty:
         st.subheader(f"🔎 Fast erfüllt — beobachten ({len(df_fast)})")
-        st.dataframe(df_fast.drop(columns=["Erfüllt"]),
+        st.dataframe(df_fast.drop(columns=["Erfüllt"]), use_container_width=True, hide_index=True)
+
+    with st.expander(f"📋 Alle {len(df_all)} Aktien"):
+        st.dataframe(df_all.sort_values("Erfüllt", ascending=False).drop(columns=["Erfüllt"]),
                      use_container_width=True, hide_index=True)
 
-    with st.expander(f"📋 Alle {len(df_all)} Aktien anzeigen"):
-        st.dataframe(
-            df_all.sort_values("Erfüllt", ascending=False).drop(columns=["Erfüllt"]),
-            use_container_width=True, hide_index=True,
-        )
-
-    with st.expander("📖 Kriterien-Erklärung"):
+    with st.expander("📖 Kriterien"):
         st.markdown("""
-| # | Kriterium | Was wird geprüft |
-|---|-----------|-----------------|
-| 1 | **Momentum** | Starke Bewegung vor dem Rectangle (Mindest-% konfigurierbar) |
-| 2 | **Rectangle** | Enge Konsolidierungszone (Max. Range % konfigurierbar) |
-| 3 | **1/3 Regel** | Korrektur max. 33% des vorherigen Momentum-Runs |
-| 4 | **Tageshoch** | Rectangle liegt am Tageshoch oder Tagestief |
-| 5 | **Seitwärts** | Flache Hochs und Tiefs — kein Dreieck oder Flagge |
-| 6 | **Auflagen** | Min. 2× Berührung der Ober- UND Unterseite |
+| # | Kriterium | Beschreibung |
+|---|-----------|-------------|
+| 1 | **Momentum** | Starke Bewegung vor dem Rectangle |
+| 2 | **Rectangle** | Enge Konsolidierungszone |
+| 3 | **1/3 Regel** | Korrektur max. 33% des Momentums |
+| 4 | **Tageshoch** | Rectangle am Tageshoch oder Tagestief |
+| 5 | **Seitwärts** | Flache Hochs und Tiefs |
+| 6 | **Auflagen** | Min. 2× Berührung oben UND unten |
         """)
 
-    # ── Auto-Refresh ──────────────────────────────────────────────────────────
     if auto_ref:
         time.sleep(60)
         st.rerun()
