@@ -193,6 +193,19 @@ def get_data(ticker):
             if attempt < 2: time.sleep(3)
     return None
 
+@st.cache_data(ttl=3600)
+def get_volumen(ticker):
+    """Holt das durchschnittliche Tagesvolumen der letzten 5 Tage."""
+    try:
+        time.sleep(0.3)
+        df = yf.download(ticker, period="5d", interval="1d",
+                         progress=False, auto_adjust=True, threads=False)
+        df = normalize_df(df)
+        if df is None or df.empty: return 0
+        return int(df["Volume"].values.flatten().astype(float).mean())
+    except Exception:
+        return 0
+
 @st.cache_data(ttl=300)
 def get_vix():
     for attempt in range(3):
@@ -209,25 +222,53 @@ def get_vix():
     return None
 
 # ── Setup-Erkennung ───────────────────────────────────────────────────────────
-def check_setup(df, p):
+def check_setup(df, p, volumen=0):
     n  = len(df)
     lb = min(p["lookback"],   max(n // 3, 5))
     ml = min(p["mom_kerzen"], max(n - lb - 1, 5))
     r  = dict(momentum=False, rectangle=False, ein_drittel=False,
               tageshoch=False, seitwaerts=False, auflagen=False,
+              liquiditaet=False, kurs_ok=False, kein_gap=False, tp_ok=False,
               hi=0.0, lo=0.0, range_pct=0.0, corr_pct=0.0,
               touch_res=0, touch_sup=0, mom_pct=0.0, kurs=0.0,
-              erfuellt=0, status="NEIN")
+              richtung="LONG", erfuellt=0, status="NEIN")
     try:
         if n < lb + ml: return r
         recent = df.iloc[-lb:]
         prior  = df.iloc[-(lb + ml):-lb]
         if prior.empty or recent.empty: return r
+
         hi   = float(recent["High"].values.flatten().astype(float).max())
         lo   = float(recent["Low"].values.flatten().astype(float).min())
         kurs = float(df["Close"].values.flatten().astype(float)[-1])
         rng  = (hi - lo) / lo * 100 if lo > 0 else 0
         r.update(hi=hi, lo=lo, range_pct=round(rng,2), kurs=round(kurs,2))
+
+        # ── Tageshoch bestimmen für Richtung ──────────────────────────────────
+        dh = float(df["High"].values.flatten().astype(float).max())
+        dl = float(df["Low"].values.flatten().astype(float).min())
+        nahe_hoch = hi >= dh * (1 - p["near_high_pct"]/100)
+        nahe_tief = lo <= dl * (1 + p["near_high_pct"]/100)
+        r["tageshoch"] = nahe_hoch or nahe_tief
+        r["richtung"]  = "LONG" if nahe_hoch else "SHORT"
+
+        # ── Kriterium: Liquidität (Volumen > 1 Mio/Tag) ───────────────────────
+        r["liquiditaet"] = volumen >= p["min_volumen"]
+
+        # ── Kriterium: Kurs > $5 (kein Penny Stock) ───────────────────────────
+        r["kurs_ok"] = kurs >= p["min_kurs"]
+
+        # ── Kriterium: Keine Intraday-Gaps im M1 Chart ────────────────────────
+        closes  = df["Close"].values.flatten().astype(float)
+        opens   = df["Open"].values.flatten().astype(float)
+        max_gap = 0.0
+        for j in range(1, len(closes)):
+            if closes[j-1] > 0:
+                gap_pct = abs(opens[j] - closes[j-1]) / closes[j-1] * 100
+                max_gap = max(max_gap, gap_pct)
+        r["kein_gap"] = max_gap < p["max_gap_pct"]
+
+        # ── Momentum ──────────────────────────────────────────────────────────
         ph = float(prior["High"].values.flatten().astype(float).max())
         pl = float(prior["Low"].values.flatten().astype(float).min())
         mp = max((ph-pl)/pl*100 if pl>0 else 0, (ph-pl)/ph*100 if ph>0 else 0)
@@ -235,31 +276,52 @@ def check_setup(df, p):
         cv = prior["Close"].values.flatten().astype(float)
         r["momentum"]  = mp >= p["min_mom_pct"] and float(cv[-1]) != float(cv[0])
         r["rectangle"] = rng < p["max_range_pct"]
+
+        # ── 1/3 Regel ─────────────────────────────────────────────────────────
         ms = ph - pl; rs = hi - lo
         cp = (rs/ms*100) if ms > 0 else 100
         r["corr_pct"]    = round(cp, 1)
         r["ein_drittel"] = cp < p["max_corr_pct"]
-        dh = float(df["High"].values.flatten().astype(float).max())
-        dl = float(df["Low"].values.flatten().astype(float).min())
-        r["tageshoch"] = (hi >= dh*(1-p["near_high_pct"]/100) or
-                          lo <= dl*(1+p["near_high_pct"]/100))
+
+        # ── TP-Mindestabstand $0.10 ────────────────────────────────────────────
+        # Rectangle-Breite muss mind. $0.10 betragen (sonst zu ruhige Aktie)
+        rect_breite_dollar = hi - lo
+        r["tp_ok"] = rect_breite_dollar >= p["min_tp_abstand"]
+
+        # ── Seitwärts-Check (inkl. Dreieck-Filter) ────────────────────────────
         half = max(lb//2, 3)
         if len(recent) > half:
             he = float(recent.iloc[:half]["High"].values.flatten().astype(float).max())
             hl = float(recent.iloc[half:]["High"].values.flatten().astype(float).max())
             le = float(recent.iloc[:half]["Low"].values.flatten().astype(float).min())
             ll = float(recent.iloc[half:]["Low"].values.flatten().astype(float).min())
-            r["seitwaerts"] = (abs(hl-he)/hi*100 < p["sideways_tol"] and
-                               abs(ll-le)/lo*100 < p["sideways_tol"])
+            # Flache Hochs und Tiefs = Seitwärts (kein Dreieck, keine Flagge)
+            highs_flat = abs(hl-he)/hi*100 < p["sideways_tol"]
+            lows_flat  = abs(ll-le)/lo*100 < p["sideways_tol"]
+            # Dreieck-Filter: Highs dürfen nicht fallen UND Lows dürfen nicht steigen
+            kein_dreieck = not (hl < he * 0.999 and ll > le * 1.001)
+            r["seitwaerts"] = highs_flat and lows_flat and kein_dreieck
+
+        # ── Auflagen — richtungsabhängig laut PDF ─────────────────────────────
+        # Long: primär obere Linie zählt (Widerstand)
+        # Short: primär untere Linie zählt (Support)
         tol = p["touch_tol"] / 100
         r["touch_res"] = int((recent["High"].values.flatten().astype(float) >= hi*(1-tol)).sum())
         r["touch_sup"] = int((recent["Low"].values.flatten().astype(float)  <= lo*(1+tol)).sum())
-        r["auflagen"]  = (r["touch_res"] >= p["min_touches"] and
-                          r["touch_sup"] >= p["min_touches"])
+        if r["richtung"] == "LONG":
+            # Long: obere Trendlinie muss mind. 2 Auflagen haben
+            r["auflagen"] = r["touch_res"] >= p["min_touches"]
+        else:
+            # Short: untere Trendlinie muss mind. 2 Auflagen haben
+            r["auflagen"] = r["touch_sup"] >= p["min_touches"]
+
+        # ── Alle Kriterien summieren ───────────────────────────────────────────
         erf = sum([r["momentum"], r["rectangle"], r["ein_drittel"],
-                   r["tageshoch"], r["seitwaerts"], r["auflagen"]])
+                   r["tageshoch"], r["seitwaerts"], r["auflagen"],
+                   r["liquiditaet"], r["kurs_ok"], r["kein_gap"], r["tp_ok"]])
         r["erfuellt"] = erf
-        r["status"]   = "SETUP ✓" if erf==6 else "FAST" if erf>=4 else "NEIN"
+        # Setup nur wenn alle 10 Kriterien erfüllt
+        r["status"] = "SETUP ✓" if erf==10 else "FAST" if erf>=7 else "NEIN"
     except Exception:
         r["status"] = "FEHLER"
     return r
@@ -281,12 +343,16 @@ def main():
     with st.sidebar:
         st.markdown("### ⚙️ Parameter")
         p = {
-            "lookback":      st.slider("Lookback Kerzen",       5,  60,  20),
-            "max_range_pct": st.slider("Max. Range %",          0.2, 3.0, 1.5, 0.1),
-            "min_touches":   st.slider("Min. Auflagepunkte",    2,   5,   2),
-            "min_mom_pct":   st.slider("Min. Momentum %",       0.5, 5.0, 1.5, 0.1),
-            "max_corr_pct":  st.slider("Max. Korrektur %",      10,  50,  33),
-            "sideways_tol":  st.slider("Seitwärts Toleranz %",  0.1, 1.0, 0.4, 0.05),
+            "lookback":        st.slider("Lookback Kerzen",         5,   60,  20),
+            "max_range_pct":   st.slider("Max. Range %",            0.2, 3.0, 1.5, 0.1),
+            "min_touches":     st.slider("Min. Auflagepunkte",      2,   5,   2),
+            "min_mom_pct":     st.slider("Min. Momentum %",         0.5, 5.0, 1.5, 0.1),
+            "max_corr_pct":    st.slider("Max. Korrektur %",        10,  50,  33),
+            "sideways_tol":    st.slider("Seitwärts Toleranz %",    0.1, 1.0, 0.4, 0.05),
+            "min_volumen":     st.number_input("Min. Volumen/Tag", value=1_000_000, step=500_000),
+            "min_kurs":        st.slider("Min. Kurs ($)",           1.0, 20.0, 5.0, 0.5),
+            "max_gap_pct":     st.slider("Max. Gap % (M1)",         0.01, 0.5, 0.05, 0.01),
+            "min_tp_abstand":  st.slider("Min. TP-Abstand ($)",     0.05, 0.5, 0.10, 0.05),
             "mom_kerzen": 30, "touch_tol": 0.05, "near_high_pct": 0.5,
         }
         st.divider()
@@ -332,13 +398,15 @@ def main():
 
             if df is None:
                 fehler_ticker.append(ticker)
-                rows.append({"Aktie":ticker,"Kurs":"–","Status":"FEHLER",
+                rows.append({"Aktie":ticker,"Kurs":"–","Richtung":"–","Status":"FEHLER",
                              "Momentum":"✗","Rectangle":"✗","1/3 Regel":"✗",
                              "Tageshoch":"✗","Seitwärts":"✗","Auflagen":"✗",
+                             "Liquidität":"✗","Kurs>$5":"✗","Kein Gap":"✗","TP≥$0.10":"✗",
                              "Range %":"–","Korrektur %":"–","R/S":"–","Erfüllt":0})
                 continue
 
-            r = check_setup(df, p)
+            vol = get_volumen(ticker)
+            r   = check_setup(df, p, volumen=vol)
 
             # Setup-Alert
             if tg_aktiv and r["status"] == "SETUP ✓" and ticker not in st.session_state["gemeldet"]:
@@ -356,17 +424,24 @@ def main():
                 st.session_state["gemeldet"].discard(ticker)
 
             rows.append({
-                "Aktie": ticker, "Kurs": f"${r['kurs']}", "Status": r["status"],
-                "Momentum":  "✓" if r["momentum"]    else "✗",
-                "Rectangle": "✓" if r["rectangle"]   else "✗",
-                "1/3 Regel": "✓" if r["ein_drittel"] else "✗",
-                "Tageshoch": "✓" if r["tageshoch"]   else "✗",
-                "Seitwärts": "✓" if r["seitwaerts"]  else "✗",
-                "Auflagen":  "✓" if r["auflagen"]    else "✗",
+                "Aktie":       ticker,
+                "Kurs":        f"${r['kurs']}",
+                "Richtung":    r["richtung"],
+                "Status":      r["status"],
+                "Momentum":    "✓" if r["momentum"]    else "✗",
+                "Rectangle":   "✓" if r["rectangle"]   else "✗",
+                "1/3 Regel":   "✓" if r["ein_drittel"] else "✗",
+                "Tageshoch":   "✓" if r["tageshoch"]   else "✗",
+                "Seitwärts":   "✓" if r["seitwaerts"]  else "✗",
+                "Auflagen":    "✓" if r["auflagen"]    else "✗",
+                "Liquidität":  "✓" if r["liquiditaet"] else "✗",
+                "Kurs>$5":     "✓" if r["kurs_ok"]    else "✗",
+                "Kein Gap":    "✓" if r["kein_gap"]   else "✗",
+                "TP≥$0.10":    "✓" if r["tp_ok"]      else "✗",
                 "Range %":     f"{r['range_pct']}%",
                 "Korrektur %": f"{r['corr_pct']}%",
-                "R/S": f"R:{r['touch_res']}  S:{r['touch_sup']}",
-                "Erfüllt": r["erfuellt"],
+                "R/S":         f"R:{r['touch_res']}  S:{r['touch_sup']}",
+                "Erfüllt":     r["erfuellt"],
             })
 
         # ── Monitoring: Fehlerquote prüfen ────────────────────────────────────
@@ -431,12 +506,16 @@ def main():
         st.markdown("""
 | # | Kriterium | Beschreibung |
 |---|-----------|-------------|
-| 1 | **Momentum** | Starke Bewegung vor dem Rectangle |
-| 2 | **Rectangle** | Enge Konsolidierungszone |
-| 3 | **1/3 Regel** | Korrektur max. 33% des Momentums |
-| 4 | **Tageshoch** | Rectangle am Tageshoch oder Tagestief |
-| 5 | **Seitwärts** | Flache Hochs und Tiefs |
-| 6 | **Auflagen** | Min. 2× Berührung oben UND unten |
+| 1 | **Momentum** | Starker Trend vor dem Rectangle (Aufwärts oder Abwärts) |
+| 2 | **Rectangle** | Enge Konsolidierungszone (Max. Range % einstellbar) |
+| 3 | **1/3 Regel** | Korrektur max. 33% der Momentumbewegung |
+| 4 | **Tageshoch** | Rectangle am Tageshoch (Long) oder Tagestief (Short) |
+| 5 | **Seitwärts** | Flache Hochs und Tiefs — kein Dreieck, keine Flagge |
+| 6 | **Auflagen** | Long: min. 2× obere Linie berührt · Short: min. 2× untere Linie |
+| 7 | **Liquidität** | Volumen > 1 Mio/Tag (kein illiquider Titel) |
+| 8 | **Kurs > $5** | Kein Penny Stock |
+| 9 | **Kein Gap** | Keine Intraday-Gaps im M1 Chart |
+| 10 | **TP ≥ $0.10** | Rectangle breit genug für sinnvollen Take-Profit |
         """)
 
     if auto_ref:
