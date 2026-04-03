@@ -34,8 +34,12 @@ hr { border-color: #21262d !important; }
 """, unsafe_allow_html=True)
 
 # ── Telegram Konfiguration ────────────────────────────────────────────────────
-TELEGRAM_TOKEN   = st.secrets["TELEGRAM_TOKEN"]
-TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+try:
+    TELEGRAM_TOKEN   = st.secrets["TELEGRAM_TOKEN"]
+    TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+except Exception:
+    TELEGRAM_TOKEN   = ""
+    TELEGRAM_CHAT_ID = ""
 
 def send_telegram(text):
     """Schickt eine Nachricht an Telegram."""
