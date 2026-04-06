@@ -117,21 +117,25 @@ def markt_offen():
 
 def monitor_ok_nachricht():
     """
-    Schickt einmal pro Tag eine Bestätigung — aber nur wenn der Markt offen ist.
-    Verhindert sinnlose Nachrichten am Wochenende oder außerhalb der Handelszeiten.
+    Tägliche Bestätigung — robust gegen App-Neustarts auf Streamlit Cloud.
+    Nutzt /tmp Datei statt Session-State (überlebt App-Neustarts nicht,
+    aber wird beim ersten Scan nach Marktöffnung zuverlässig ausgelöst).
     """
     if not markt_offen():
         return
-    if "letzter_ok_tag" not in st.session_state:
-        st.session_state["letzter_ok_tag"] = ""
-    heute = datetime.now().strftime("%Y-%m-%d")
-    if st.session_state["letzter_ok_tag"] == heute:
+    import os
+    heute      = datetime.now().strftime("%Y-%m-%d")
+    flag_file  = f"/tmp/rect_ok_{heute}.flag"
+    if os.path.exists(flag_file):
         return
-    st.session_state["letzter_ok_tag"] = heute
+    try:
+        open(flag_file, "w").close()
+    except Exception:
+        pass
     now = datetime.now().strftime("%H:%M:%S")
     send_telegram(
-        f"✅ <b>Scanner läuft — tägliche Bestätigung</b>\n\n"
-        f"Rectangle Scanner ist aktiv und funktioniert.\n"
+        f"✅ <b>Rectangle Scanner läuft</b>\n\n"
+        f"Erster Scan des Tages abgeschlossen.\n"
         f"342 Aktien werden überwacht.\n"
         f"🕐 {now}"
     )
@@ -519,7 +523,15 @@ def main():
         """)
 
     if auto_ref:
-        time.sleep(60)
+        # Keep-Alive: verhindert App-Einschlafen auf Streamlit Cloud
+        import os
+        ka_file = "/tmp/rect_keepalive.txt"
+        try:
+            with open(ka_file, "w") as f:
+                f.write(datetime.now().isoformat())
+        except Exception:
+            pass
+        time.sleep(90)
         st.rerun()
 
 if __name__ == "__main__":
