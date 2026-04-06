@@ -6,6 +6,11 @@ import urllib.request
 import json
 import time
 from datetime import datetime
+import pytz
+
+_BERLIN = pytz.timezone("Europe/Berlin")
+def now_berlin():
+    return datetime.now(_BERLIN)
 
 st.set_page_config(
     page_title="Rectangle Scanner",
@@ -67,7 +72,7 @@ def monitor_fehler(fehler_typ, details=""):
     if fehler_typ in st.session_state["gemeldete_fehler"]:
         return  # Bereits gemeldet — kein Spam
     st.session_state["gemeldete_fehler"].add(fehler_typ)
-    now = datetime.now().strftime("%H:%M:%S")
+    now = now_berlin().strftime("%H:%M:%S")
 
     nachrichten = {
         "DATEN_FEHLER": (
@@ -105,7 +110,7 @@ def markt_offen():
     Prüft ob der US-Markt gerade offen ist.
     US-Markt: Mo–Fr 15:30–22:00 Uhr DE-Zeit (MEZ/MESZ)
     """
-    now  = datetime.now()
+    now  = now_berlin()
     wday = now.weekday()          # 0=Mo, 4=Fr, 5=Sa, 6=So
     hour = now.hour
     minute = now.minute
@@ -124,7 +129,7 @@ def monitor_ok_nachricht():
     if not markt_offen():
         return
     import os
-    heute      = datetime.now().strftime("%Y-%m-%d")
+    heute      = now_berlin().strftime("%Y-%m-%d")
     flag_file  = f"/tmp/rect_ok_{heute}.flag"
     if os.path.exists(flag_file):
         return
@@ -132,7 +137,7 @@ def monitor_ok_nachricht():
         open(flag_file, "w").close()
     except Exception:
         pass
-    now = datetime.now().strftime("%H:%M:%S")
+    now = now_berlin().strftime("%H:%M:%S")
     send_telegram(
         f"✅ <b>Rectangle Scanner läuft</b>\n\n"
         f"Erster Scan des Tages abgeschlossen.\n"
@@ -342,7 +347,7 @@ def main():
         st.title("🟦 Rectangle Scanner")
         st.caption("Momentum-Konsolidierung am Tageshoch · 1-Minuten-Chart · 342 Aktien")
     with col_h2:
-        st.metric("🕐 Uhrzeit", datetime.now().strftime("%H:%M:%S"))
+        st.metric("🕐 Uhrzeit", now_berlin().strftime("%H:%M:%S"))
 
     with st.sidebar:
         st.markdown("### ⚙️ Parameter")
@@ -416,7 +421,7 @@ def main():
             if tg_aktiv and r["status"] == "SETUP ✓" and ticker not in st.session_state["gemeldet"]:
                 st.session_state["gemeldet"].add(ticker)
                 neue_setups.append(ticker)
-                now_s = datetime.now().strftime("%H:%M:%S")
+                now_s = now_berlin().strftime("%H:%M:%S")
                 send_telegram(
                     f"🟦 <b>RECTANGLE SETUP ✅</b>\n"
                     f"<b>{ticker}</b> — alle 6 Kriterien erfüllt\n"
@@ -469,7 +474,7 @@ def main():
         st.success(f"🔔 Telegram Alert gesendet für: {', '.join(neue_setups)}")
 
     df_all  = pd.DataFrame(rows)
-    scan_ts = datetime.now().strftime("%H:%M:%S")
+    scan_ts = now_berlin().strftime("%H:%M:%S")
 
     # Metriken
     c1,c2,c3,c4,c5,c6 = st.columns(6)
@@ -528,7 +533,7 @@ def main():
         ka_file = "/tmp/rect_keepalive.txt"
         try:
             with open(ka_file, "w") as f:
-                f.write(datetime.now().isoformat())
+                f.write(now_berlin().isoformat())
         except Exception:
             pass
         time.sleep(90)
